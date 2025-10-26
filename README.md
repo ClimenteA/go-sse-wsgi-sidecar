@@ -19,6 +19,23 @@ GO_SSE_SIDECAR_REDIS_URL=redis://:your-password@localhost-or-docker-container-na
 GO_SSE_SIDECAR_TOKEN=secret-token-here
 ```
 
+Add this to your docker compose file. Or, use the Dockerfile in this repo. You also have the option to download the binary available on releases.
+
+```yml
+
+services:
+  sse_sidecar:
+    image: climentea/go-sse-wsgi-sidecar:latest
+    container_name: sse-sidecar
+    restart: unless-stopped
+    ports:
+      - "5687:5687"
+    env_file:
+      - .env
+
+```
+
+
 On the Python/Django app:
 - Install `pyjwt` package - this will be used to make sure only the authentificated user can have access to the server sent events.
 - Install `redis` package - we'll use here redis pub/sub functionality to have the Django app sending events and this app to send those recived events to frontend. If you already have celery/django-rq or other similar packages you could use the same connection as I did.
@@ -125,3 +142,19 @@ Having `setInterval` on frontend is a solution, but I've seen it so many times g
 This method it's faster, consumes less resources and sends events only when that event really happends.
 
 To avoid all this hassle you could just use FastAPI :))
+
+
+<!-- 
+
+docker build -t climentea/go-sse-wsgi-sidecar .
+
+docker login -u climentea
+
+Get the PAT from dockerhub
+
+docker push climentea/go-sse-wsgi-sidecar
+
+ -->
+
+
+
