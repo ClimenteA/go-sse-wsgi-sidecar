@@ -8,7 +8,7 @@ Until Django becomes full async this will help with implementing SSE in your web
 A good use case for this is when you send some work to a background worker and you want the user to be informed on each status. Another case is for AI chatbots - you can send stream text as it comes from the LLM API.
 
 
-![sse-updates](sse-message-updates.mp4)
+![](./media/sse-message-updates.mp4)
 
 
 ## How to implement SSE in Django
