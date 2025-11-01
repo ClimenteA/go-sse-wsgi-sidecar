@@ -13,10 +13,6 @@ import (
 )
 
 var ctx = context.Background()
-var clients = make(map[*SSEClient]bool)
-var addClient = make(chan *SSEClient)
-var removeClient = make(chan *SSEClient)
-var broadcast = make(chan string)
 
 type SSEClient struct {
 	channel chan string
@@ -36,50 +32,36 @@ func getRedisClient() *redis.Client {
 	return redis.NewClient(opts)
 }
 
-func redisSubscriber(rdb *redis.Client) {
-	log.Println("[SSE-SIDECAR] Subscribing to channel: events")
+func subscribeToUserChannel(rdb *redis.Client, userID int64, msgChan chan<- string, ctx context.Context) {
+	channelName := fmt.Sprintf("events:user:%d", userID)
+	log.Printf("[SSE] Subscribing to Redis channel: %s", channelName)
 
-	pubsub := rdb.Subscribe(ctx, "events")
-	defer func() {
-		log.Println("[SSE-SIDECAR] Closing subscription to channel: events")
-		pubsub.Close()
-	}()
+	pubsub := rdb.Subscribe(ctx, channelName)
+	defer pubsub.Close()
 
+	// Wait for subscription confirmation
 	_, err := pubsub.Receive(ctx)
 	if err != nil {
-		log.Printf("[SSE-SIDECAR] Failed to subscribe: %v\n", err)
+		log.Printf("[SSE] Failed to subscribe to %s: %v", channelName, err)
 		return
 	}
 
 	ch := pubsub.Channel()
 
-	log.Println("[SSE-SIDECAR] Listening for messages...")
-
-	for msg := range ch {
-		log.Printf("[SSE-SIDECAR] Received message: %s\n", msg.Payload)
-		broadcast <- msg.Payload
-	}
-
-	log.Println("[SSE-SIDECAR] Subscription channel closed")
-}
-
-func clientManager() {
 	for {
 		select {
-		case client := <-addClient:
-			clients[client] = true
-		case client := <-removeClient:
-			delete(clients, client)
-			close(client.channel)
-		case msg := <-broadcast:
-			for client := range clients {
+		case msg := <-ch:
+			if msg != nil {
+				log.Printf("[SSE] User %d received message: %s", userID, msg.Payload)
 				select {
-				case client.channel <- msg:
+				case msgChan <- msg.Payload:
 				default:
-					delete(clients, client)
-					close(client.channel)
+					log.Printf("[SSE] Dropping message for user %d (client slow)", userID)
 				}
 			}
+		case <-ctx.Done():
+			log.Printf("[SSE] Stopping subscription for user %d", userID)
+			return
 		}
 	}
 }
@@ -90,7 +72,6 @@ type SSETokenClaims struct {
 }
 
 func verifySseToken(tokenString string, secret string) (*SSETokenClaims, error) {
-
 	token, err := jwt.ParseWithClaims(tokenString, &SSETokenClaims{}, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
@@ -118,12 +99,13 @@ func sseHandler(w http.ResponseWriter, r *http.Request) {
 
 	claims, err := verifySseToken(token, secret)
 	if err != nil {
-		fmt.Println("Token verification failed:", err)
+		log.Printf("Token verification failed: %v", err)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	fmt.Printf("Token success! UserID: %d\n", claims.UserID)
-	fmt.Printf("Token expires at: %v\n", claims.ExpiresAt.Time)
+	userID := claims.UserID
+	log.Printf("Authenticated SSE connection for user %d (expires: %v)", userID, claims.ExpiresAt.Time)
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -131,20 +113,30 @@ func sseHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := &SSEClient{channel: make(chan string, 10)}
-	addClient <- client
-	defer func() { removeClient <- client }()
+	// Create per-client context that respects request cancellation
+	clientCtx, cancel := context.WithCancel(r.Context())
+	defer cancel()
 
+	client := &SSEClient{
+		channel: make(chan string, 10),
+	}
+
+	rdb := getRedisClient()
+	go subscribeToUserChannel(rdb, userID, client.channel, clientCtx)
+
+	// Set headers for SSE
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
+	// Send messages to client
 	for {
 		select {
 		case msg := <-client.channel:
 			fmt.Fprintf(w, "data: %s\n\n", msg)
 			flusher.Flush()
-		case <-r.Context().Done():
+		case <-clientCtx.Done():
+			log.Printf("Closing SSE for user %d", userID)
 			return
 		}
 	}
@@ -155,13 +147,9 @@ func main() {
 
 	rdb := getRedisClient()
 	defer rdb.Close()
-
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		log.Fatalf("Redis error: %v", err)
 	}
-
-	go redisSubscriber(rdb)
-	go clientManager()
 
 	http.HandleFunc("/sse-events", sseHandler)
 

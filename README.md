@@ -1,10 +1,11 @@
 # SSE WSGI Helper
 
 Helper service which you can use along Django/Flask WSGI to handle Server Sent Events (SSE) with minimal resources to run.
-Server Sent Events (SSE) work only in ASGI. Having this small service (built in Golang) helps implement SSE in WSGI python frameworks.
+Server Sent Events (SSE) work only in ASGI. Having this small service helps implement SSE in WSGI python frameworks.
 
 Until Django becomes full async this will help with implementing SSE in your web application. I've tried using Django async, but lost hot reload on browser and server - I couldn't make that compromise.
 
+A good use case for this is when you send some work to a background worker and you want the user to be informed on each status. Another case is for AI chatbots - you can send stream text as it comes from the LLM API.
 
 ## How to implement SSE in Django
 
@@ -84,7 +85,7 @@ urlpatterns = [
 ```
 
 I've used the connection of django_rq because it was already in my setup, but you can create a new redis connection if you want.
-It must be the same connection for both services so they can write to the same pub/sub server.
+It must be the same connection for both services so they can write to the same pub/sub server. Each user will have it's own channel to receive messages on.
 
 Add this somewhere in your utils package:
 
@@ -94,9 +95,11 @@ import json
 import django_rq
 
 
-def publish(event_name: str, data: dict):
+def publish(user_id: str, data: dict):
     r = django_rq.get_connection()
-    r.publish("events", json.dumps({"event": event_name, "data": data}))
+    r.publish(
+        f"events:user:{user_id}", json.dumps({"event_type": "event_name", "data": data})
+    )
 
 ```
 
